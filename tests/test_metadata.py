@@ -26,16 +26,14 @@ class MetadataTests(unittest.TestCase):
         """Manifest links should resolve to this repository."""
         self.assertEqual(
             self.manifest["documentation"],
-            "https://github.com/jefairba/jackery-ha/blob/main/README.md",
+            "https://github.com/chandlerhuff/jackery-homeassistant/blob/main/README.md",
         )
-        # HACS requires issue_tracker; issues are off in this fork, so it points
-        # at the README's Support section, never at upstream's tracker.
+        # Support links should point at this repository's issue tracker.
         self.assertEqual(
             self.manifest["issue_tracker"],
-            "https://github.com/jefairba/jackery-ha#support",
+            "https://github.com/chandlerhuff/jackery-homeassistant/issues",
         )
-        self.assertIn("## Support", self.readme)
-        self.assertEqual(self.manifest["codeowners"], ["@jefairba"])
+        self.assertEqual(self.manifest["codeowners"], ["@chandlerhuff"])
 
     def test_readme_version_badge_matches_manifest(self) -> None:
         """README badge should advertise the same release as the manifest."""
@@ -46,14 +44,14 @@ class MetadataTests(unittest.TestCase):
             self.readme,
         )
 
-    def test_fork_version_marks_upstream_base(self) -> None:
-        """Fork releases are <upstream version>-jf.<n>."""
-        self.assertRegex(self.manifest["version"], r"^\d+\.\d+\.\d+-jf\.\d+$")
+    def test_version_matches_release_workflow(self) -> None:
+        """Release tags use plain semantic versions."""
+        self.assertRegex(self.manifest["version"], r"^\d+\.\d+\.\d+$")
 
-    def test_hacs_offers_only_tagged_releases(self) -> None:
-        """This fork pins installs to releases; HACS must hide the default branch."""
-        self.assertTrue(self.hacs["hide_default_branch"])
-        self.assertIn("default branch is hidden", self.readme)
+    def test_hacs_offers_default_branch_for_unreleased_fixes(self) -> None:
+        """HACS can install unreleased fixes from the default branch."""
+        self.assertFalse(self.hacs["hide_default_branch"])
+        self.assertIn("default branch directly", self.readme)
 
     def test_repository_files_do_not_reference_fork_links(self) -> None:
         """The published metadata should not point at the temporary contributor fork."""

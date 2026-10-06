@@ -1,12 +1,12 @@
-> This is a community-maintained project. Issue responses may be slow, but pull requests are welcome! Reasonable PRs will be reviewed, tested, and merged.
+> This is a community-maintained project. Pull requests are welcome!
 
 > **Note:** This integration targets the **Jackery** app backend (used by portable stations like the Explorer series and Smart Transfer Switch). If your device is managed by the **Jackery Home** app (e.g. HomePower 2000 Ultra, SolarVault), that app uses a different API; see [iLLixM/jackery_home_cloud-ha](https://github.com/iLLixM/jackery_home_cloud-ha) for a community integration targeting that backend.
 
 # Jackery Home Assistant Integration
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/custom-components/hacs)
-[![maintainer](https://img.shields.io/badge/maintainer-%40theak-blue.svg)](https://github.com/theak)
-[![version](https://img.shields.io/badge/version-1.2.0-blue.svg)](https://github.com/theak/jackery-homeassistant)
+[![maintainer](https://img.shields.io/badge/maintainer-%40chandlerhuff-blue.svg)](https://github.com/chandlerhuff)
+[![version](https://img.shields.io/badge/version-1.2.1-blue.svg)](https://github.com/chandlerhuff/jackery-homeassistant)
 
 Custom Home Assistant integration for monitoring and controlling Jackery portable power stations and the Smart Transfer Switch. Provides real-time sensors, writable controls, and automation services.
 
@@ -26,7 +26,7 @@ For the full entity reference, see the [Wiki](../../wiki).
 ### HACS (Recommended)
 
 1. Install [HACS](https://hacs.xyz/) if you have not already.
-2. Add this repository as a custom repository in HACS.
+2. Add [chandlerhuff/jackery-homeassistant](https://github.com/chandlerhuff/jackery-homeassistant) as a custom repository in HACS, using the **Integration** category.
 3. Search for "Jackery" in the integrations section and click Download.
 4. Restart Home Assistant.
 

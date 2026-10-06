@@ -74,6 +74,7 @@ def install_homeassistant_stubs(stubbed_modules: dict[str, object]) -> None:
 
         BATTERY = "battery"
         DURATION = "duration"
+        ENERGY = "energy"
         FREQUENCY = "frequency"
         POWER = "power"
         TEMPERATURE = "temperature"
@@ -97,6 +98,7 @@ def install_homeassistant_stubs(stubbed_modules: dict[str, object]) -> None:
 
         MEASUREMENT = "measurement"
         TOTAL = "total"
+        TOTAL_INCREASING = "total_increasing"
 
     class EntityCategory:
         """Stub entity category enum."""
@@ -168,6 +170,31 @@ def tearDownModule() -> None:
 
 class EntityDescriptionTests(unittest.TestCase):
     """Validate metadata for the read-only Jackery entities."""
+
+    def test_battery_levels_are_regular_sensors(self) -> None:
+        """Battery state is the top priority: not hidden under Diagnostic."""
+        by_key = {d.key: d for d in const.SENSOR_DESCRIPTIONS}
+        for key in ("ac1_rb", "ac1_trb", "ac1_pack_1_rb", "ac1_pack_2_rb", "ac2_rb", "ac2_pack_5_rb"):
+            self.assertIsNone(by_key[key].entity_category, key)
+
+    def test_energy_counters_fit_the_energy_dashboard(self) -> None:
+        by_key = {d.key: d for d in const.SENSOR_DESCRIPTIONS}
+        for key in ("dg", "dh", "de", "ds"):
+            d = by_key[key]
+            self.assertEqual(d.device_class, "energy", key)
+            self.assertEqual(d.state_class, "total_increasing", key)
+            self.assertEqual(d.native_unit_of_measurement, "Wh", key)
+            self.assertIsNone(d.entity_category, key)
+
+    def test_time_estimate_placeholders_are_unknown(self) -> None:
+        """~999 tenths (99.9 h) means 'not applicable', not a real estimate."""
+        by_key = {d.key: d for d in const.SENSOR_DESCRIPTIONS}
+        for key in ("it", "ot", "ac1_it", "ac1_ot", "ac2_it", "ac2_ot"):
+            convert = by_key[key].value
+            self.assertIsNone(convert(999), key)
+            self.assertIsNone(convert(998), key)
+            self.assertEqual(convert(125), 12.5, key)
+            self.assertEqual(convert(0), 0.0, key)
 
     def test_sensor_descriptions_include_new_live_api_fields(self) -> None:
         """New live properties should have sensor descriptions with the right units."""

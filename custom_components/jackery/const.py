@@ -26,6 +26,9 @@ from homeassistant.const import (
 
 # The domain of your integration. Should be unique.
 DOMAIN = "jackery"
+CONF_ANDROID_ID = "android_id"
+CONF_YIELD_MINUTES = "yield_minutes"
+DEFAULT_YIELD_MINUTES = 15
 
 # Polling interval
 POLLING_INTERVAL_SEC = 60
@@ -38,7 +41,11 @@ CHARGING_PLAN_DATA = "108"
 ENTITY_HELP_TEXT: dict[str, str] = {
     # Sensors
     "rb": "Current battery charge level across all connected packs.",
-    "ddt": "Minimum battery % reserved for backup during power outages.",
+    "ddt": (
+        "UNVERIFIED: does not match the Backup Reserve shown in the Jackery app "
+        "(that is the read-only Backup Reserve sensor, dt). Do not change this "
+        "until its effect is known."
+    ),
     "bt": "Internal battery temperature.",
     "op": "Total power currently being drawn from the device.",
     "ip": "Total power input from all sources (AC, DC, solar).",
@@ -56,6 +63,10 @@ ENTITY_HELP_TEXT: dict[str, str] = {
     "uo": "Device timezone offset from UTC (converted to hours).",
     "pss": "Whether power is supplied by grid or station (batteries/solar).",
     "last_updated": "Timestamp of the last successful data poll from Jackery API.",
+    "data_stale": (
+        "On when recent polls of the Jackery cloud failed and the values shown are "
+        "the last known ones. After about 5 minutes the entities become unavailable."
+    ),
     "ds": "Total solar energy generated.",
     "dh": "Total household energy consumed.",
     "de": "Total battery energy discharged.",
@@ -75,7 +86,11 @@ ENTITY_HELP_TEXT: dict[str, str] = {
     "fz_ntc": "NTC temperature sensor reading is abnormal.",
     "fz_rtc": "Real-time clock module fault.",
     # Battery slot sensors (Transfer Switch)
-    "ac1_rb": "Battery level of the device connected to AC1.",
+    # rb vs trb verified 2026-09-26 on an Explorer 5000 Plus + 2 packs: the
+    # app showed 86/94/94 %, the Transfer Switch reported ac1_rb=91 (the
+    # average: combined) and ac1_trb=86 (the Explorer alone). Upstream had
+    # these two labels the other way round.
+    "ac1_rb": "Combined battery level on AC1: the portable plus all add-on packs.",
     "ac1_op": "Output power from the device connected to AC1.",
     "ac1_ip": "Input power to the device connected to AC1.",
     "ac1_ot": "Estimated remaining runtime for the device connected to AC1.",
@@ -85,8 +100,8 @@ ENTITY_HELP_TEXT: dict[str, str] = {
     "ac1_bp_count": "Number of add-on battery packs connected to the AC1 device.",
     "ac1_acpsp": "Power input from solar panels connected to the AC1 device.",
     "ac1_ss": "Solar panel input type at AC1: None, High Voltage, Low Voltage, or both.",
-    "ac1_trb": "Total remaining battery energy stored in the AC1 device.",
-    "ac2_rb": "Battery level of the device connected to AC2.",
+    "ac1_trb": "Battery level of the AC1 portable's own battery, without add-on packs.",
+    "ac2_rb": "Combined battery level on AC2: the portable plus all add-on packs.",
     "ac2_op": "Output power from the device connected to AC2.",
     "ac2_ip": "Input power to the device connected to AC2.",
     "ac2_ot": "Estimated remaining runtime for the device connected to AC2.",
@@ -96,7 +111,7 @@ ENTITY_HELP_TEXT: dict[str, str] = {
     "ac2_bp_count": "Number of add-on battery packs connected to the AC2 device.",
     "ac2_acpsp": "Power input from solar panels connected to the AC2 device.",
     "ac2_ss": "Solar panel input type at AC2: None, High Voltage, Low Voltage, or both.",
-    "ac2_trb": "Total remaining battery energy stored in the AC2 device.",
+    "ac2_trb": "Battery level of the AC2 portable's own battery, without add-on packs.",
     **{f"{slot}_pack_{i}_rb": f"Battery level of add-on pack {i} connected to {slot.upper()}." for slot in ("ac1", "ac2") for i in range(1, 6)},
     # Explorer 5000 diagnostic sensors
     "ss": "Solar panel input type: None, High Voltage, Low Voltage, or both.",
@@ -159,7 +174,7 @@ ENTITY_HELP_TEXT: dict[str, str] = {
     "odcct": "DC Car Output Countdown remaining in seconds.",
     "oact": "AC Output Countdown remaining in seconds.",
     # Portable limit sensors
-    "dt": "Portable Backup Reserve percentage.",
+    "dt": "Backup Reserve as shown in the Jackery app (verified on Explorer 5000 Plus + Transfer Switch).",
     "dl": "Discharge Limit percentage.",
     "cl": "Charge Limit percentage.",
     "bc": "Battery Cutoff percentage.",
@@ -267,6 +282,16 @@ class JackerySensorEntityDescription(SensorEntityDescription):
 
 # Sensor descriptions
 # This defines all the sensors we'll create for each device.
+# Time estimates arrive in tenths of an hour. The device reports ~999 (99.9 h)
+# when an estimate doesn't apply - e.g. "time to full" while idle - or is off
+# its scale, so treat 998+ as unknown rather than a real 99.9 hours.
+_HOURS_NOT_APPLICABLE = 998
+
+
+def _tenths_of_hour(value):
+    return None if value >= _HOURS_NOT_APPLICABLE else value / 10.0
+
+
 SENSOR_DESCRIPTIONS: tuple[JackerySensorEntityDescription, ...] = (
     JackerySensorEntityDescription(
         key="rb",
@@ -333,7 +358,7 @@ SENSOR_DESCRIPTIONS: tuple[JackerySensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.DURATION,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=None,
-        value=lambda value: value / 10.0,
+        value=_tenths_of_hour,
     ),
     JackerySensorEntityDescription(
         key="ot",
@@ -342,7 +367,7 @@ SENSOR_DESCRIPTIONS: tuple[JackerySensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.DURATION,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=None,
-        value=lambda value: value / 10.0,
+        value=_tenths_of_hour,
     ),
     JackerySensorEntityDescription(
         key="acov",
@@ -426,38 +451,44 @@ SENSOR_DESCRIPTIONS: tuple[JackerySensorEntityDescription, ...] = (
         icon="mdi:clock",
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
-    # Energy counters (Transfer Switch)
+    # Energy counters (Transfer Switch): cumulative Wh. device_class energy +
+    # total_increasing make them usable in HA's Energy dashboard and tolerate a
+    # counter reset (TOTAL would record a reset as a huge negative day).
     JackerySensorEntityDescription(
         key="ds",
         name="Solar Generation",
         native_unit_of_measurement="Wh",
         icon="mdi:solar-power-variant",
-        state_class=SensorStateClass.TOTAL,
-        entity_category=EntityCategory.DIAGNOSTIC,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        entity_category=None,
     ),
     JackerySensorEntityDescription(
         key="dh",
         name="House Consumption",
         native_unit_of_measurement="Wh",
         icon="mdi:home-lightning-bolt",
-        state_class=SensorStateClass.TOTAL,
-        entity_category=EntityCategory.DIAGNOSTIC,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        entity_category=None,
     ),
     JackerySensorEntityDescription(
         key="de",
         name="Battery Discharge",
         native_unit_of_measurement="Wh",
         icon="mdi:battery-arrow-down",
-        state_class=SensorStateClass.TOTAL,
-        entity_category=EntityCategory.DIAGNOSTIC,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        entity_category=None,
     ),
     JackerySensorEntityDescription(
         key="dg",
         name="Grid Consumption",
         native_unit_of_measurement="Wh",
         icon="mdi:transmission-tower",
-        state_class=SensorStateClass.TOTAL,
-        entity_category=EntityCategory.DIAGNOSTIC,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        entity_category=None,
     ),
     # Fault sub-object fields with multiple states
     JackerySensorEntityDescription(
@@ -505,11 +536,11 @@ SENSOR_DESCRIPTIONS: tuple[JackerySensorEntityDescription, ...] = (
     # Battery slot sensors (Transfer Switch ac1/ac2 flattened)
     JackerySensorEntityDescription(
         key="ac1_rb",
-        name="AC1 Battery Level",
+        name="AC1 Combined Battery",
         native_unit_of_measurement=PERCENTAGE,
         device_class=SensorDeviceClass.BATTERY,
         state_class=SensorStateClass.MEASUREMENT,
-        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_category=None,
     ),
     JackerySensorEntityDescription(
         key="ac1_op",
@@ -543,7 +574,7 @@ SENSOR_DESCRIPTIONS: tuple[JackerySensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.DURATION,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
-        value=lambda value: value / 10.0,
+        value=_tenths_of_hour,
     ),
     JackerySensorEntityDescription(
         key="ac1_it",
@@ -552,7 +583,7 @@ SENSOR_DESCRIPTIONS: tuple[JackerySensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.DURATION,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
-        value=lambda value: value / 10.0,
+        value=_tenths_of_hour,
     ),
     JackerySensorEntityDescription(
         key="ac1_bs",
@@ -570,11 +601,11 @@ SENSOR_DESCRIPTIONS: tuple[JackerySensorEntityDescription, ...] = (
     ),
     JackerySensorEntityDescription(
         key="ac2_rb",
-        name="AC2 Battery Level",
+        name="AC2 Combined Battery",
         native_unit_of_measurement=PERCENTAGE,
         device_class=SensorDeviceClass.BATTERY,
         state_class=SensorStateClass.MEASUREMENT,
-        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_category=None,
     ),
     JackerySensorEntityDescription(
         key="ac2_op",
@@ -608,7 +639,7 @@ SENSOR_DESCRIPTIONS: tuple[JackerySensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.DURATION,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
-        value=lambda value: value / 10.0,
+        value=_tenths_of_hour,
     ),
     JackerySensorEntityDescription(
         key="ac2_it",
@@ -617,7 +648,7 @@ SENSOR_DESCRIPTIONS: tuple[JackerySensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.DURATION,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
-        value=lambda value: value / 10.0,
+        value=_tenths_of_hour,
     ),
     JackerySensorEntityDescription(
         key="ac2_bs",
@@ -656,11 +687,11 @@ SENSOR_DESCRIPTIONS: tuple[JackerySensorEntityDescription, ...] = (
     ),
     JackerySensorEntityDescription(
         key="ac1_trb",
-        name="AC1 Total Battery",
+        name="AC1 Main Unit Battery",
         native_unit_of_measurement=PERCENTAGE,
         device_class=SensorDeviceClass.BATTERY,
         state_class=SensorStateClass.MEASUREMENT,
-        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_category=None,
     ),
     JackerySensorEntityDescription(
         key="ac2_ss",
@@ -671,11 +702,11 @@ SENSOR_DESCRIPTIONS: tuple[JackerySensorEntityDescription, ...] = (
     ),
     JackerySensorEntityDescription(
         key="ac2_trb",
-        name="AC2 Total Battery",
+        name="AC2 Main Unit Battery",
         native_unit_of_measurement=PERCENTAGE,
         device_class=SensorDeviceClass.BATTERY,
         state_class=SensorStateClass.MEASUREMENT,
-        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_category=None,
     ),
     # Transfer Switch network diagnostics
     JackerySensorEntityDescription(
@@ -712,7 +743,7 @@ SENSOR_DESCRIPTIONS: tuple[JackerySensorEntityDescription, ...] = (
             native_unit_of_measurement=PERCENTAGE,
             device_class=SensorDeviceClass.BATTERY,
             state_class=SensorStateClass.MEASUREMENT,
-            entity_category=EntityCategory.DIAGNOSTIC,
+            entity_category=None,
         )
         for slot in ("ac1", "ac2")
         for i in range(1, 6)
@@ -876,7 +907,7 @@ SENSOR_DESCRIPTIONS: tuple[JackerySensorEntityDescription, ...] = (
     # Portable limit sensors
     JackerySensorEntityDescription(
         key="dt",
-        name="Portable Backup Reserve",
+        name="Backup Reserve",
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
@@ -918,6 +949,13 @@ SENSOR_DESCRIPTIONS: tuple[JackerySensorEntityDescription, ...] = (
 # - odcc: DC Car Output (for models with separate DC Car toggle)
 # - odcu: USB Output (for models with separate USB toggle)
 BINARY_SENSOR_DESCRIPTIONS: tuple[BinarySensorEntityDescription, ...] = (
+    BinarySensorEntityDescription(
+        key="data_stale",
+        name="Data Stale",
+        device_class=BinarySensorDeviceClass.PROBLEM,
+        icon="mdi:cloud-alert",
+        entity_category=None,
+    ),
     BinarySensorEntityDescription(
         key="oac",
         name="AC Output",

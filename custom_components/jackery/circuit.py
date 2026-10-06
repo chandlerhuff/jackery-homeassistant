@@ -19,7 +19,7 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
-from homeassistant.components.switch import SwitchEntity
+from homeassistant.components.select import SelectEntity
 from homeassistant.const import EntityCategory, UnitOfPower
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import DeviceInfo
@@ -196,10 +196,16 @@ class JackeryCircuitPowerSensor(CoordinatorEntity, SensorEntity):
         return attrs
 
 
-class JackeryCircuitSwitch(CoordinatorEntity, SwitchEntity):
-    """Switch to turn a circuit on or off.
+CIRCUIT_OPTIONS = ["Off", "On"]
 
-    For split-phase pairs, toggles both circuits together.
+
+class JackeryCircuitSelect(CoordinatorEntity, SelectEntity):
+    """On/Off dropdown for one panel circuit.
+
+    A select rather than a switch on purpose: "turn off" voice/area/bulk
+    commands and scenes that sweep up switches can't reach it, so a circuit
+    only changes when someone picks it by name. For split-phase (240V) pairs
+    both legs are switched together.
     """
 
     def __init__(
@@ -218,41 +224,83 @@ class JackeryCircuitSwitch(CoordinatorEntity, SwitchEntity):
         self._device_id = device_info["devId"]
         self._device_sn = device_info["devSn"]
         self._attr_unique_id = (
-            f"{self._device_id}_circuit_{self._primary_idx}_switch"
+            f"{self._device_id}_circuit_{self._primary_idx}_select"
         )
+        self._attr_options = list(CIRCUIT_OPTIONS)
         self._attr_name = f"Circuit {self._circuit_name}"
         self._attr_icon = "mdi:electric-switch"
         self._attr_entity_category = EntityCategory.CONFIG
         self._attr_device_info = _device_info(device_info)
 
     @property
-    def is_on(self) -> bool | None:
+    def current_option(self) -> str | None:
         circuit = _find_circuit(self.coordinator, self._primary_idx)
-        if circuit is None:
+        if circuit is None or circuit.get("sw") is None:
             return None
-        return circuit.get("sw") == 1
+        return "On" if circuit.get("sw") == 1 else "Off"
 
     @property
     def extra_state_attributes(self) -> dict:
         attrs: dict[str, object] = {
             "circuit_index": self._primary_idx,
             "circuit_name": self._circuit_name,
-            "description": "Toggle power to this circuit on or off.",
+            "description": (
+                "Power to this circuit from the Transfer Switch. Choose Off to "
+                "cut it. Does not reflect a tripped breaker."
+            ),
         }
         if self._partner_idx is not None:
             attrs["split_phase_partner"] = self._partner_idx
             attrs["combined"] = True
         return attrs
 
-    async def async_turn_on(self, **kwargs) -> None:
-        await self._async_set_switch(True)
+    async def _async_restore_legs(
+        self, legs: list[int], previous: dict[int, object]
+    ) -> str:
+        """Return each leg to its previous state; describe the outcome."""
+        restored, failed = [], []
+        for idx in legs:
+            if previous.get(idx) is None:
+                failed.append(f"leg {idx} (previous state unknown)")
+                continue
+            try:
+                await self._api.async_set_circuit_switch(
+                    self._device_id, self._device_sn, idx, previous[idx] == 1
+                )
+                restored.append(f"leg {idx}")
+            except Exception as err:  # noqa: BLE001 - report every leg
+                failed.append(f"leg {idx} ({err})")
+        if failed:
+            _LOGGER.error(
+                "Circuit %s may be split across legs: restore failed for %s",
+                self._circuit_name,
+                ", ".join(failed),
+            )
+            return (
+                "WARNING: 240V circuit may be on only one leg - could not "
+                f"restore {', '.join(failed)}"
+                + (f"; restored {', '.join(restored)}" if restored else "")
+            )
+        return f"restored {', '.join(restored)} to previous state"
 
-    async def async_turn_off(self, **kwargs) -> None:
-        await self._async_set_switch(False)
+    async def async_select_option(self, option: str) -> None:
+        if option not in CIRCUIT_OPTIONS:
+            raise HomeAssistantError(
+                f"Unsupported option '{option}' for circuit {self._circuit_name}"
+            )
+        await self._async_set_switch(option == "On")
 
     async def _async_set_switch(self, on: bool) -> None:
+        action = "enable" if on else "disable"
+        previous = {
+            c.get("idx"): c.get("sw")
+            for c in _get_circuits(self.coordinator)
+            if c.get("idx") in self._indices
+        }
+        attempted: list[int] = []
         try:
             for idx in self._indices:
+                attempted.append(idx)
                 await self._api.async_set_circuit_switch(
                     self._device_id,
                     self._device_sn,
@@ -260,12 +308,19 @@ class JackeryCircuitSwitch(CoordinatorEntity, SwitchEntity):
                     on,
                 )
         except Exception as err:
+            detail = str(err)
+            if len(self._indices) > 1:
+                # A 240V circuit is two legs switched one at a time. If a leg
+                # failed after another switched, the load would be left on one
+                # leg. Put every leg we touched (including the failed one,
+                # which may have applied anyway) back to its previous state.
+                detail += "; " + await self._async_restore_legs(attempted, previous)
+            await self.coordinator.async_request_refresh()
             raise HomeAssistantError(
-                f"Failed to {'enable' if on else 'disable'} circuit "
-                f"{self._circuit_name}: {err}"
+                f"Failed to {action} circuit {self._circuit_name}: {detail}"
             ) from err
 
-        # Optimistic update
+        # Every leg confirmed by the device: show it now, then re-read.
         circuits = _get_circuits(self.coordinator)
         for circuit in circuits:
             if circuit.get("idx") in self._indices:

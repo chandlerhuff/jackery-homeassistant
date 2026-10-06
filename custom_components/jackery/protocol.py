@@ -36,13 +36,16 @@ class JackeryControlSpec:
 
 CONTROL_SPECS: dict[str, JackeryControlSpec] = {
     # Portable device properties
+    # AC Output feeds the Transfer Switch, i.e. the house during an outage,
+    # so it is a dropdown like the circuits: bulk "turn off" can't reach it.
     "oac": JackeryControlSpec(
         key="oac",
         slug="ac",
         name="AC Output",
-        platform="switch",
+        platform="select",
         icon="mdi:power-plug",
         action_id=4,
+        options=("Off", "On"),
     ),
     "odc": JackeryControlSpec(
         key="odc",
@@ -157,10 +160,13 @@ CONTROL_SPECS: dict[str, JackeryControlSpec] = {
     # modules (TRANSFER_SWITCH_COMMANDS / _NUMBER_COMMANDS / _SELECT_COMMANDS).
     # action_id is intentionally omitted here; these never go through
     # async_set_device_property.
+    # ddt is NOT the reserve shown in the Jackery app: on an Explorer 5000
+    # Plus + Transfer Switch (2026-09-26) the app showed 90 % while ddt=15
+    # and dt=90. What writing ddt does is unknown, so the name says so.
     "ddt": JackeryControlSpec(
         key="ddt",
         slug="ddt",
-        name="Backup Reserve",
+        name="Backup Reserve (ddt, unverified)",
         platform="number",
         icon="mdi:battery-lock",
     ),
@@ -193,19 +199,25 @@ CONTROL_SPECS: dict[str, JackeryControlSpec] = {
         icon="mdi:transfer-switch",
         options=("Automatic Charging", "Scheduled Tasks", "Self Consumption"),
     ),
+    # UPS and Grid/Station can cut or switch the house's power, so they are
+    # dropdowns rather than switches: "turn off" / area / bulk commands and
+    # scenes that sweep up switches can't reach a select. Option order is
+    # the device value (index 0 -> 0, 1 -> 1).
     "ups": JackeryControlSpec(
         key="ups",
         slug="ups",
         name="UPS Mode",
-        platform="switch",
+        platform="select",
         icon="mdi:power-plug-battery",
+        options=("Off", "On"),
     ),
     "pss": JackeryControlSpec(
         key="pss",
         slug="pss",
         name="Grid / Station",
-        platform="switch",
+        platform="select",
         icon="mdi:transmission-tower",
+        options=("Grid", "Battery"),  # pss: 0 = grid, 1 = station
     ),
     "rc": JackeryControlSpec(
         key="rc",
@@ -270,6 +282,28 @@ def _normalize_model_name(value: object) -> str:
 
     normalized = _MODEL_NAME_SANITIZER.sub(" ", value.casefold())
     return " ".join(normalized.split())
+
+
+# Controls whose commands only exist on the Transfer Switch. Their action IDs
+# mean something else on a portable (e.g. action 6 is UPS on the Transfer
+# Switch but DC input on an Explorer), so they are never created elsewhere.
+TRANSFER_SWITCH_ONLY_KEYS = frozenset(
+    {"en", "pss", "ups", "rc", "wps", "ddt", "autoDt", "cdsDt", "selfDt"}
+)
+
+
+def device_control_keys(
+    device_info: Mapping[str, object] | None,
+    properties: Mapping[str, object] | None,
+    keys,
+) -> list[str]:
+    """supported_keys(), minus Transfer Switch-only controls on other devices."""
+    is_box = is_transfer_switch_device(device_info, properties)
+    return [
+        key
+        for key in supported_keys(properties, keys)
+        if is_box or key not in TRANSFER_SWITCH_ONLY_KEYS
+    ]
 
 
 def is_transfer_switch_device(

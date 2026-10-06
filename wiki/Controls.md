@@ -8,13 +8,13 @@ See [Device Availability](Device-Availability) for a full breakdown of which con
 
 | Entity | Description |
 |--------|-------------|
-| AC Output | Toggle AC output |
+| AC Output | Dropdown (Off / On) for AC output. On an Explorer connected to the Transfer Switch this feeds the house, so it is a select, not a switch, in this fork. |
 | Charging Plan | Enable or disable charging plans |
 | Circuit {name} | Toggle individual circuits on/off (Transfer Switch) |
 | DC Car Output | Toggle DC car output |
 | DC Output | Toggle combined DC output |
 | Force Charge | Force battery to charge from grid regardless of working mode (Transfer Switch) |
-| Grid / Station | Toggle between grid power and station power (Transfer Switch) |
+| Grid / Station | Dropdown (Grid / Battery) selecting grid or station power (Transfer Switch). A select, not a switch, in this fork. |
 | Plan {name} | Toggle individual scheduled plans on/off (Transfer Switch) |
 | Super Fast Charge | Toggle super fast charge mode |
 | UPS Mode | Toggle UPS mode (Transfer Switch) |

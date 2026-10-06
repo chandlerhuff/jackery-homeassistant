@@ -92,6 +92,7 @@ def install_homeassistant_stubs(stubbed_modules: dict[str, object]) -> None:
     class Platform:
         """Stub platform enum."""
 
+        BUTTON = "button"
         SENSOR = "sensor"
         BINARY_SENSOR = "binary_sensor"
         SWITCH = "switch"
@@ -163,6 +164,9 @@ def install_package_stubs(stubbed_modules: dict[str, object]) -> None:
 
     const_mod = types.ModuleType(f"{TEST_PACKAGE}.const")
     const_mod.DOMAIN = "jackery"
+    const_mod.CONF_ANDROID_ID = "android_id"
+    const_mod.CONF_YIELD_MINUTES = "yield_minutes"
+    const_mod.DEFAULT_YIELD_MINUTES = 15
     const_mod.POLLING_INTERVAL_SEC = 60
     const_mod.SENSOR_DESCRIPTIONS = ()
     const_mod.BINARY_SENSOR_DESCRIPTIONS = ()
@@ -197,9 +201,10 @@ def install_package_stubs(stubbed_modules: dict[str, object]) -> None:
         update_plan_calls: list = []
         delete_plan_calls: list = []
 
-        def __init__(self, account: str, password: str) -> None:
+        def __init__(self, account: str, password: str, android_id: str | None = None) -> None:
             self.account = account
             self.password = password
+            self.android_id = android_id
             type(self).instances.append(self)
 
         def get_device_list(self) -> dict[str, object]:
@@ -233,20 +238,33 @@ def install_package_stubs(stubbed_modules: dict[str, object]) -> None:
                 raise type(self).circuits_error
             return list(type(self).circuits_result)
 
+        # Like the real API, plan commands return the device's confirmed
+        # plan list; here the "device" is plans_result.
         async def async_create_transfer_switch_plan(
             self, device_id: str, device_sn: str, plan: dict
-        ) -> None:
+        ) -> list:
             type(self).create_plan_calls.append((device_id, device_sn, plan))
+            type(self).plans_result = [*type(self).plans_result, dict(plan)]
+            return list(type(self).plans_result)
 
         async def async_update_transfer_switch_plan(
             self, device_id: str, device_sn: str, plan: dict
-        ) -> None:
+        ) -> list:
             type(self).update_plan_calls.append((device_id, device_sn, plan))
+            type(self).plans_result = [
+                dict(plan) if str(p.get("pid")) == str(plan.get("pid")) else p
+                for p in type(self).plans_result
+            ]
+            return list(type(self).plans_result)
 
         async def async_delete_transfer_switch_plan(
             self, device_id: str, device_sn: str, pid: str
-        ) -> None:
+        ) -> list:
             type(self).delete_plan_calls.append((device_id, device_sn, pid))
+            type(self).plans_result = [
+                p for p in type(self).plans_result if str(p.get("pid")) != str(pid)
+            ]
+            return list(type(self).plans_result)
 
         @classmethod
         def reset(cls) -> None:
@@ -268,6 +286,9 @@ def install_package_stubs(stubbed_modules: dict[str, object]) -> None:
 
     api_mod.JackeryAPI = JackeryAPI
     api_mod.JackeryAuthenticationError = JackeryAuthenticationError
+    api_mod.new_android_id = lambda: "0123456789abcdef"
+    api_mod.JackeryCommandError = type("JackeryCommandError", (Exception,), {})
+    api_mod.JackerySessionYielded = type("JackerySessionYielded", (api_mod.JackeryCommandError,), {})
 
     _install_stub_module(stubbed_modules, f"{TEST_PACKAGE}.const", const_mod)
     _install_stub_module(stubbed_modules, f"{TEST_PACKAGE}.protocol", protocol_mod)
@@ -306,6 +327,7 @@ class AsyncSetupEntryTests(unittest.IsolatedAsyncioTestCase):
             data={},
             async_add_executor_job=AsyncMock(side_effect=lambda func, *args: func(*args)),
             config_entries=types.SimpleNamespace(
+                async_update_entry=lambda entry, data: setattr(entry, "data", data),
                 async_forward_entry_setups=AsyncMock(),
                 async_unload_platforms=AsyncMock(return_value=True),
             ),
@@ -349,6 +371,46 @@ class AsyncSetupEntryTests(unittest.IsolatedAsyncioTestCase):
 
         hass.config_entries.async_forward_entry_setups.assert_not_awaited()
 
+    async def test_setup_entry_backfills_device_identity(self) -> None:
+        """Entries created before per-install IDs get one generated and saved."""
+        hass = self._make_hass()
+        entry = self._make_entry()
+
+        await integration.async_setup_entry(hass, entry)
+
+        self.assertEqual(entry.data["android_id"], "0123456789abcdef")
+        self.assertEqual(api.JackeryAPI.instances[-1].android_id, "0123456789abcdef")
+        self.assertEqual(entry.data["username"], "user@example.com")
+
+    async def test_setup_entry_keeps_existing_device_identity(self) -> None:
+        """A stored ID must be reused, never regenerated, across restarts."""
+        hass = self._make_hass()
+        entry = self._make_entry()
+        entry.data = {**entry.data, "android_id": "feedfacecafebeef"}
+
+        await integration.async_setup_entry(hass, entry)
+
+        self.assertEqual(entry.data["android_id"], "feedfacecafebeef")
+        self.assertEqual(api.JackeryAPI.instances[-1].android_id, "feedfacecafebeef")
+
+    async def test_setup_entry_applies_yield_option(self) -> None:
+        """The options-flow value (minutes) becomes the API's yield (seconds)."""
+        hass = self._make_hass()
+        entry = self._make_entry()
+        entry.options = {"yield_minutes": 0}
+
+        await integration.async_setup_entry(hass, entry)
+
+        self.assertEqual(api.JackeryAPI.instances[-1].yield_seconds, 0)
+
+    async def test_setup_entry_defaults_yield_to_15_minutes(self) -> None:
+        hass = self._make_hass()
+        entry = self._make_entry()
+
+        await integration.async_setup_entry(hass, entry)
+
+        self.assertEqual(api.JackeryAPI.instances[-1].yield_seconds, 900)
+
     async def test_setup_entry_succeeds_without_devices(self) -> None:
         """An empty account should stay loaded instead of failing setup outright."""
         hass = self._make_hass()
@@ -390,6 +452,7 @@ class AsyncSetupEntryTests(unittest.IsolatedAsyncioTestCase):
                 "ip": 15,
                 "oac": 1,
                 "last_updated": "2026-04-18T19:00:00+01:00",
+                "data_stale": 0,
             },
         )
         self.assertEqual(raw_properties, {"rb": 42, "ip": 15, "oac": 1})
@@ -418,6 +481,16 @@ class AsyncSetupEntryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refreshed["rb"], 42)
         self.assertEqual(refreshed["ip"], 15)
         self.assertEqual(refreshed["oac"], 1)
+        # One blip is not flagged; a second consecutive miss is.
+        self.assertEqual(refreshed["data_stale"], 0)
+        refreshed = await coordinator.update_method()
+        self.assertEqual(refreshed["data_stale"], 1)
+        self.assertEqual(refreshed["rb"], 42)
+
+        # Recovery clears the flag.
+        api.JackeryAPI.device_detail_error = None
+        refreshed = await coordinator.update_method()
+        self.assertEqual(refreshed["data_stale"], 0)
 
     async def test_coordinator_raises_after_persistent_http_failures(self) -> None:
         """Once the failure streak exceeds the tolerance, refresh should fail."""
@@ -434,8 +507,8 @@ class AsyncSetupEntryTests(unittest.IsolatedAsyncioTestCase):
         coordinator = hass.data["jackery"][entry.entry_id]["coordinators"]["device-1"]
 
         api.JackeryAPI.device_detail_error = ConnectionError("outage")
-        # Tolerate up to MAX_HTTP_FAILURES misses, then raise UpdateFailed.
-        for _ in range(15):
+        # Tolerate up to MAX_HTTP_FAILURES (5, ~5 min) misses, then raise UpdateFailed.
+        for _ in range(5):
             await coordinator.update_method()
         with self.assertRaises(integration.UpdateFailed):
             await coordinator.update_method()
@@ -485,6 +558,7 @@ class TransferSwitchCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             data={},
             async_add_executor_job=AsyncMock(side_effect=lambda func, *args: func(*args)),
             config_entries=types.SimpleNamespace(
+                async_update_entry=lambda entry, data: setattr(entry, "data", data),
                 async_forward_entry_setups=AsyncMock(),
                 async_unload_platforms=AsyncMock(return_value=True),
             ),
@@ -522,29 +596,83 @@ class TransferSwitchCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         circuit_calls = len(api.JackeryAPI.circuits_query_calls)
 
         api.JackeryAPI.device_detail_error = ConnectionError("dns blip")
-        # Run enough polls to exceed both PLAN_QUERY_EVERY_N and CIRCUIT_QUERY_EVERY_N
+        # Run enough polls to exceed both PLAN_QUERY_EVERY_N and CIRCUIT_QUERY_EVERY_N.
+        # Past MAX_HTTP_FAILURES the poll itself fails; queries must still not run.
         for _ in range(12):
-            await coordinator.update_method()
+            try:
+                await coordinator.update_method()
+            except integration.UpdateFailed:
+                pass
 
         self.assertEqual(len(api.JackeryAPI.plans_query_calls), plan_calls)
         self.assertEqual(len(api.JackeryAPI.circuits_query_calls), circuit_calls)
 
-    async def test_plan_cache_preserved_when_query_returns_empty(self) -> None:
-        """An empty plan-query response must not wipe the cached plan list."""
+    async def _poll_until_plan_query(self, coordinator) -> dict:
+        """Poll until a plan query happens; return that poll's data."""
+        before = len(api.JackeryAPI.plans_query_calls)
+        for _ in range(10):
+            data = await coordinator.update_method()
+            if len(api.JackeryAPI.plans_query_calls) > before:
+                return data
+        self.fail("no plan query within 10 polls")
+
+    async def test_device_reporting_no_plans_clears_the_list(self) -> None:
+        """[] is a real answer: after deleting the last plan HA must show none.
+
+        Upstream kept the old list on [], so deleted plans reappeared.
+        """
+        api.JackeryAPI.plans_result = [
+            {"pid": "p1", "tt": 0, "st": "22:00", "et": "06:00", "sw": 1, "lps": 127}
+        ]
+        coordinator = await self._setup_ts()
+        self.assertEqual(len(coordinator.data["_plans"]), 1)
+
+        api.JackeryAPI.plans_result = []
+        data = await self._poll_until_plan_query(coordinator)
+        self.assertEqual(data["_plans"], [])
+
+    async def test_plan_cache_preserved_when_query_gets_no_answer(self) -> None:
+        """No answer (None) must not wipe the cached plan list."""
         api.JackeryAPI.plans_result = [
             {"pid": "p1", "tt": 0, "st": "22:00", "et": "06:00", "sw": 1, "lps": 127}
         ]
         coordinator = await self._setup_ts()
 
-        self.assertEqual(len(coordinator.data["_plans"]), 1)
+        original_query = api.JackeryAPI.async_query_transfer_switch_plans
 
-        api.JackeryAPI.plans_result = []
-        # Drive 4 more polls so the plan counter reaches PLAN_QUERY_EVERY_N (5)
-        for _ in range(4):
-            await coordinator.update_method()
+        async def no_answer(self, device_sn):
+            type(self).plans_query_calls.append(device_sn)
+            return None
 
-        self.assertEqual(len(coordinator.data["_plans"]), 1)
-        self.assertEqual(coordinator.data["_plans"][0]["pid"], "p1")
+        api.JackeryAPI.async_query_transfer_switch_plans = no_answer
+        try:
+            data = await self._poll_until_plan_query(coordinator)
+        finally:
+            api.JackeryAPI.async_query_transfer_switch_plans = original_query
+        self.assertEqual([p["pid"] for p in data["_plans"]], ["p1"])
+
+    async def test_missing_circuits_are_requeried_every_poll(self) -> None:
+        """If the startup circuit query got nothing, retry on the next poll.
+
+        Seen 2026-09-26: the startup query timed out and circuits stayed
+        unavailable until the every-10th-poll query.
+        """
+        api.JackeryAPI.circuits_result = []
+        coordinator = await self._setup_ts()
+        calls = len(api.JackeryAPI.circuits_query_calls)
+
+        api.JackeryAPI.circuits_result = [
+            {"idx": 1, "nm": "T2ZmaWNl", "pc": 100, "sw": 1, "sph": 0, "pr": 1}
+        ]
+        data = await coordinator.update_method()
+
+        self.assertEqual(len(api.JackeryAPI.circuits_query_calls), calls + 1)
+        self.assertEqual(len(data["_circuits"]), 1)
+
+        # Once circuits are known, back to the normal cadence.
+        calls = len(api.JackeryAPI.circuits_query_calls)
+        await coordinator.update_method()
+        self.assertEqual(len(api.JackeryAPI.circuits_query_calls), calls)
 
     async def test_circuit_cache_preserved_when_query_returns_empty(self) -> None:
         """An empty circuit-query response must not wipe the cached circuit list."""
@@ -606,6 +734,7 @@ class PlanServiceTests(unittest.IsolatedAsyncioTestCase):
             data={},
             async_add_executor_job=AsyncMock(side_effect=lambda func, *args: func(*args)),
             config_entries=types.SimpleNamespace(
+                async_update_entry=lambda entry, data: setattr(entry, "data", data),
                 async_forward_entry_setups=AsyncMock(),
                 async_unload_platforms=AsyncMock(return_value=True),
             ),
@@ -681,6 +810,20 @@ class PlanServiceTests(unittest.IsolatedAsyncioTestCase):
         call = types.SimpleNamespace(data={"plan_id": "nonexistent"})
         with self.assertRaises(integration.HomeAssistantError):
             await services["update_plan"](call)
+
+    async def test_confirmed_delete_survives_the_next_poll(self) -> None:
+        """A confirmed delete must not be undone by the poll's plan cache."""
+        api.JackeryAPI.plans_result = [
+            {"pid": "p1", "tt": 0, "st": "22:00", "et": "06:00", "sw": 1, "lps": 127},
+            {"pid": "p2", "tt": 1, "st": "15:00", "et": "18:00", "sw": 1, "lps": 127},
+        ]
+        hass, services, coordinator = await self._setup_ts_with_services()
+        await services["delete_plan"](types.SimpleNamespace(data={"plan_id": "p2"}))
+        self.assertEqual([p["pid"] for p in coordinator.data["_plans"]], ["p1"])
+
+        # A normal poll (no plan query this time) re-injects the cache.
+        data = await coordinator.update_method()
+        self.assertEqual([p["pid"] for p in data["_plans"]], ["p1"])
 
     async def test_delete_plan_sends_correct_pid(self) -> None:
         """delete_plan must forward the plan_id to the API delete method."""

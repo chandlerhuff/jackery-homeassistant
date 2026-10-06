@@ -27,7 +27,7 @@ Properties marked **MQTT only** are not included in the HTTP snapshot and requir
 | `cep` | object | Currently executing plan | HTTP | Active Plan sensor |
 | `cir` | list | Circuit list (see sub-object below) | MQTT only | Circuit sensors/switches |
 | `de` | int | Battery discharge today (Wh cumulative) | HTTP | Battery Discharge energy sensor |
-| `ddt` | int | Default/current backup reserve (%) | HTTP | Backup Reserve number |
+| `ddt` | int | Unknown. Upstream calls it the backup reserve, but it does not match the app (app 90, ddt 15) | HTTP | Backup Reserve (ddt, unverified) number |
 | `dg` | int | Grid consumption today (Wh cumulative) | HTTP | Grid Consumption energy sensor |
 | `dh` | int | House consumption today (Wh cumulative) | HTTP | House Consumption energy sensor |
 | `ds` | int | Solar generation today (Wh cumulative) | HTTP | Solar Generation energy sensor |
@@ -37,12 +37,12 @@ Properties marked **MQTT only** are not included in the HTTP snapshot and requir
 | `ip` | int | Input power (W) | HTTP | Total Input Power sensor |
 | `op` | int | Output power (W) | HTTP | Output Power sensor |
 | `ot` | int | Remaining output time | HTTP | Remaining Output Time sensor |
-| `pss` | int | Power system state (0=Grid, 1=Station) | HTTP | Power System State sensor + Grid/Station switch |
+| `pss` | int | Power system state (0=Grid, 1=Station) | HTTP | Power System State sensor + Grid / Station select |
 | `rb` | int | Remaining battery (%) | HTTP | Remaining Battery sensor |
 | `rc` | int | Rapid/force charging (0=off, 1=on) | HTTP | Force Charge switch |
 | `selfDt` | int | Self Consumption mode backup reserve (%) | HTTP | Self Consumption Mode Backup Reserve number |
 | `storm` | list | Weather/storm events | MQTT only | Not mapped (location-based alert system, complex) |
-| `ups` | int | UPS mode (0=off, 1=on) | HTTP | UPS Mode switch + binary sensor |
+| `ups` | int | UPS mode (0=off, 1=on) | HTTP | UPS Mode select + binary sensor |
 | `wps` | int | WiFi Protected Setup (0=off, 1=on) | HTTP | WiFi Protected Setup switch |
 
 ### AC Slot Sub-Object (ac1 / ac2)
@@ -58,10 +58,10 @@ Properties marked **MQTT only** are not included in the HTTP snapshot and requir
 | `mc` | int | Model code | Not mapped |
 | `op` | int | Output power (W) | AC1/AC2 Output Power sensor |
 | `ot` | int | Remaining output time | AC1/AC2 Remaining Time sensor |
-| `rb` | int | Remaining battery (%) | AC1/AC2 Battery Level sensor |
+| `rb` | int | Combined battery (%) across the portable and all add-on packs | AC1/AC2 Combined Battery sensor |
 | `sn` | str | Serial number | Not mapped (device attribute) |
 | `ss` | int | Solar status (0=none, 1=high V, 2=low V, 3=both) | AC1/AC2 Solar Type sensor |
-| `trb` | int | Total battery % across station + all packs combined | AC1/AC2 Total Battery sensor |
+| `trb` | int | The portable's own battery (%), without add-on packs (verified on Explorer 5000 Plus + 2 packs; upstream documented the reverse) | AC1/AC2 Main Unit Battery sensor |
 
 ### Add-on Battery Pack Sub-Object (bp items in ac1/ac2)
 
@@ -137,7 +137,7 @@ Properties marked **MQTT only** are not included in the HTTP snapshot and requir
 | `cs` | int | Charge speed | HTTP | Charge Speed select |
 | `dhg_recall` | int | Restore previous output state after startup (0=off, 1=on) | HTTP | Discharge Memory switch |
 | `dl` | int | Discharge limit (%) | HTTP | Discharge Limit sensor |
-| `dt` | int | Portable backup reserve (%) | HTTP | Portable Backup Reserve sensor |
+| `dt` | int | Backup reserve (%) as shown in the Jackery app (verified: app 90, dt 90) | HTTP | Backup Reserve sensor |
 | `ec` | int | Error code | HTTP | Error Code sensor |
 | `en` | int | Working mode (reported when box=1) | HTTP | Not mapped |
 | `iac` | int | Input AC connected status | HTTP | AC Input Connected binary sensor |
